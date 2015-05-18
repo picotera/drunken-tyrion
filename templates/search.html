@@ -1,0 +1,19 @@
+<form method="POST" action="/SearchForm">
+    {{ form.hidden_tag() }}<br>
+    
+    {% if error %}
+        Error: {{ error }}<br>
+    {% endif %}
+    
+    First Name {{ form.first_name(size=10) }}<br>
+    Last Name {{ form.last_name(size=10) }}<br>
+    OR Full Name (for company) {{ form.full_name(size=20) }}<br>
+    ID (Required) {{ form.id(size=20) }}<br>
+    Country of Origin (Required) {{ form.origin_country(size=10) }}<br>
+    Country of Transaction (Required) {{form.current_country(size=10) }}<br>
+    Google {{form.use_google(checked=True)}}
+    Fativa {{form.use_factiva(checked=True)}}
+    Lexis* {{form.use_lexis(checked=True)}} <br>
+    *Lexis requires First & Last name<br>
+    <input type="submit" value="Go">
+</form>
