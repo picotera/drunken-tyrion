@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-import threading
 import pika, os, uuid, logging,sys, ConfigParser
 import json
+import time
+import threading
 
 logging.basicConfig()
 
@@ -22,11 +23,23 @@ def validate(value, current, default=None):
     else:
         return value
 
-class RabbitFrame(object):
+class RabbitFrame(threading.Thread):
 
-    def __init__(self, config, server=None, user=None, password=None, vhost=None, timeout=None):
+    def __init__(self, logger, config, queue, server=None, user=None, password=None, vhost=None, timeout=None):
         self.server = self.user = self.password = self.vhost = self.timeout = None
+
+        self.logger = logger
+        self.queue = queue
         
+        # Is the frame ready to start
+        self._ready = False
+
+        self._ioloop = None
+        
+        # Later this could be changed, but code declaring the exchange will need to be added.
+        self.exchange = queue
+        self.closing = False
+
         self.config = config
         self.__loadConfiguration()
         self.__initInfrastructure(server, user, password, vhost, timeout)
@@ -52,24 +65,68 @@ class RabbitFrame(object):
     def __initInfrastructure(self, server=None, user=None, password=None, vhost=None, timeout=None):
         self.__setInfrastructure(server, user, password, vhost, timeout) #override config file if the user wants
         ampq_url = "amqp://%s:%s@%s/%s" % (self.user,self.password,self.server,self.vhost)
-        url = os.environ.get('CLOUDAMQP_URL',ampq_url)
-	
-        params = pika.URLParameters(url)
+        self.url = os.environ.get('CLOUDAMQP_URL',ampq_url)
+        
+        self._connect()
+        
+        self._ioloop = threading.Thread(target=self.connection.ioloop.start, name='%s_ioloop' %self.queue, args=())
+        self._ioloop.start()
+                              
+    def _connect(self):
+        params = pika.URLParameters(self.url)
         params.socket_timeout = self.timeout
-        self.connection = pika.BlockingConnection(params) # Connect to CloudAMQP
-        self.channel = self.connection.channel() # start a channel
+        self.connection = pika.SelectConnection(params,
+                                     on_open_callback = self._onOpen,
+                                     on_close_callback = self._onClose,
+                                     stop_ioloop_on_close=False)
+    
+    def _onOpen(self, connection):
+        self.connection.channel(on_open_callback=self._onChannelOpen) # start a channel
 
+    def _onClose(self, connection, reply_code, reply_text):
+        self.channel = None
+        if self.closing:
+            self.connection.ioloop.stop()
+        else:
+            self.logger.error('Channel closed, reopening')
+            if not self.closing:
+                # Create a new connection
+                self.connection = self._connect()
+                # Since this gets called by the thread, we don't need to start another thread
+                self.connection.ioloop.start()
+    
+    def _onChannelOpen(self, channel):
+        self.channel = channel
+        
+        self.channel.add_on_close_callback(self._onChannelClose)
+        
+        self.channel.exchange_declare(self._onExchangeOk,
+                                      self.exchange) # self.EXCHANGE_TYPE)
+
+    def _onChannelClose(self, channel, reply_code, reply_text):
+        # When a channel is closed it's because of bad usage, close the channel
+        self.closing = True
+        self.connection.close()
+
+    def _onExchangeOk(self, unused_frame):
+        self.channel.queue_declare(self._onQueueOk, self.queue, durable=True)
+        
+    def _onQueueOk(self, method_frame):
+        self.channel.queue_bind(self._onBindOk, self.queue, self.exchange)
+
+    def _onBindOk(self, unused_frame):
+        self._ready = True
         
 class RabbitSender(RabbitFrame):
     
-    def __init__(self, config, queue, reply_to=None):
-        RabbitFrame.__init__(self, config)
+    def __init__(self, logger, config, queue, reply_to=None):
+        RabbitFrame.__init__(self, logger, config, queue)
         
         self.lock = threading.Lock()
+        self.reply_to = reply_to
         
-        self.queue = queue
-        self.channel.queue_declare(queue, durable=True)
-        self.reply_to = reply_to       
+        while not self._ready:
+            time.sleep(0.5)
 
     def Send(self, data=None, corr_id=None, reply_to_queue=None):
         if corr_id == None:
@@ -81,19 +138,19 @@ class RabbitSender(RabbitFrame):
         # Make this thread safe just in case
         with self.lock:
             # send a message
-            self.channel.basic_publish(exchange='', 
-                                       routing_key=self.queue, 
-                                       body=message,
-                                       properties=pika.BasicProperties(
-                                           delivery_mode = 2, # make message persistent
-                                           correlation_id = corr_id,
-                                           reply_to = reply_to_queue,
-                                       ))
+            try:
+                self.channel.basic_publish(exchange=self.exchange, 
+                                           routing_key=self.queue, 
+                                           body=message,
+                                           properties=pika.BasicProperties(
+                                               delivery_mode = 2, # make message persistent
+                                               correlation_id = corr_id,
+                                               reply_to = reply_to_queue,
+                                           ))
+            except:
+                self.logger.exception("Error publishing to queue %s" %(self.queue, message))
                               
-        #TODO: This should be moved to a log eventually
-        print "Sender: Produced message to queue %s with:" %self.queue
-        print "\t correlation ID: %s" % corr_id
-        print "\t body: %s" % message
+        self.logger.debug("Sender: Produced message to queue %s with:\n\tcorrelation ID: %s\n\tbody: %s" %(self.queue, corr_id, message))
         
         return corr_id
 
@@ -103,46 +160,42 @@ def printCallback(data, properties):
     
 class RabbitReceiver(RabbitFrame, threading.Thread):
 
-    def __init__(self, config, queue, callback, read_repeatedly=False):
-        RabbitFrame.__init__(self, config)
+    def __init__(self, logger, config, queue, callback, read_repeatedly=False):
+        RabbitFrame.__init__(self, logger, config, queue)
         threading.Thread.__init__(self, name='RabbitReceiver %s' %queue)
-        
-        self.queue = queue
-        self.channel.queue_declare(queue, durable=True) # Declare a queue
 
         self.read_repeatedly = read_repeatedly
         self.callback = callback
-
-    def __callback(self, ch, method, properties, body):
-        # Take care of parsing and acknowledging
-        if (body is not None):
-            data = json.loads(body)
-            self.callback(data, properties)          
         
-        ch.basic_ack(delivery_tag = method.delivery_tag)
+        while not self._ready:
+            time.sleep(0.5)
+
+    def __wrapper(self, ch, method, properties, body):
+        # Take care of parsing and acknowledging
+        try:
+            if (body is not None):
+                data = json.loads(body)
+                self.callback(data, properties)          
+            
+            ch.basic_ack(delivery_tag = method.delivery_tag)
+        except Exception:
+            self.logger.exception('Error in rabbitcoat receiver on queue %s, %s' %(self.queue, body))
         
     def run(self):
-        channel = self.channel
         ''' Bind a callback to the queue '''
         #TODO: This should be moved to a log eventually
-        print "Receiver: starting to consume messeges on queue %s" %self.queue
+        self.logger.debug("Receiver: starting to consume messeges on queue %s" %self.queue)
 
-        # set up subscription on the queue
-        channel.basic_qos(prefetch_count=1)
-
-        channel.basic_consume(self.__callback,
+        self.channel.basic_consume(self.__wrapper,
                               self.queue,
                               no_ack=self.read_repeatedly)
-
-        channel.start_consuming()
 
 # A basic print response for debugging
 def printResponse(body):
     return "response: got %s" % str(body)
     
 class SimpleRabbitResponder(RabbitReceiver):
-    '''
-    A simple responder that responds to one queue only
+    '''A simple responder that responds to one queue only
     '''
     def __init__(self, config, inbound_queue, response_function, out_queue, read_repeatedly=False):
         RabbitReceiver.__init__(self, config, queue, self.__responderCallback, read_repeatedly)
@@ -152,11 +205,9 @@ class SimpleRabbitResponder(RabbitReceiver):
         self.response_function = self.response_function
 
     def __responderCallback(self, data, properties):
-        '''
-        Respond to the relevant queue
-        
+        '''Respond to the relevant queue        
         This goes through __callback first, so it receives just json data and properties.
-        '''        
+        '''
         response = self.response_function(data)
         
         self.sender.Send(data=response, corr_id=properties.correlation_id)
@@ -211,7 +262,6 @@ class VersatileRabbitResponder(RabbitReceiver):
         if (reply_to != None) and (reply_to != self.outbound_queue):
             sender = RabbitSender(self.config, properties.reply_to, inbound_queue)
         '''
-        
         sender.Send(self, data=response, corr_id=properties.correlation_id)        
         
         ch.basic_ack(delivery_tag = method.delivery_tag)

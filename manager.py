@@ -8,6 +8,7 @@ import server
 from helper import *
 import rabbitcoat
 import pygres
+import json
 
 # Turn down requests and pika logging
 logging.getLogger("requests").setLevel(logging.WARNING)
@@ -23,6 +24,7 @@ class SearchHandler(object):
         
         self.lock = Lock()
         
+        self.search_id = search_id
         self.google_id = google_id
         self.factiva_id = factiva_id
         self.lexis_id = lexis_id
@@ -38,13 +40,17 @@ class SearchHandler(object):
     def SendResults(self, data, corr_id):
         # Send the results to the handler. Return true if the search is finished.
         with self.lock: # To avoid sending the results twice
-            if corr_id == google_id:
+            if corr_id == self.google_id:
                 self.google_results = data
-            elif corr_id == factiva_id:
+                self.google_done = True
+            elif corr_id == self.factiva_id:
                 self.factiva_results = data
-            elif corr_id == lexis_id:
+                self.factiva_done = True
+            elif corr_id == self.lexis_id:
                 self.lexis_results = data
+                self.lexis_done = True
                 
+            print self.google_done, self.factiva_done, self.lexis_done
             if self.google_done and self.factiva_done and self.lexis_done:
                 return True
             
@@ -58,6 +64,7 @@ class SearchHandler(object):
             results[FACTIVA_KEY] = self.factiva_results
         if self.lexis_results != None:
             results[LEXIS_KEY] = self.lexis_results
+            
         return results
             
 class SearchManager(object):
@@ -73,17 +80,17 @@ class SearchManager(object):
         self.queues = {}
         self.handlers = {}
         
-        #self.db_manager = None
+        self.db_manager = None
         self.db_manager = pygres.PostgresManager(pygres_config)
         self.server = server.ManagerServer(self, config)
     
         self.__loadConfig(config)
         
-        self.google_sender = rabbitcoat.RabbitSender(rabbit_config, self.google_queue)
-        self.factiva_sender = rabbitcoat.RabbitSender(rabbit_config, self.factiva_queue)
-        self.lexis_sender = rabbitcoat.RabbitSender(rabbit_config, self.lexis_queue)
+        self.google_sender = rabbitcoat.RabbitSender(self.logger, rabbit_config, self.google_queue)
+        self.factiva_sender = rabbitcoat.RabbitSender(self.logger, rabbit_config, self.factiva_queue)
+        self.lexis_sender = rabbitcoat.RabbitSender(self.logger, rabbit_config, self.lexis_queue)
         
-        self.receiver = rabbitcoat.RabbitReceiver(rabbit_config, self.out_queue, self.__rabbitCallback)
+        self.receiver = rabbitcoat.RabbitReceiver(self.logger, rabbit_config, self.out_queue, self.__rabbitCallback)
         
         self.receiver.start()
         self.server.start()
@@ -105,7 +112,7 @@ class SearchManager(object):
             
         Data should contain the values listed in helper.py, full name is automatic 
         '''
-        print 'Handling request: %s' %search_request
+        self.logger.info('Handling search request: %s' %search_request)
         data = search_request[DATA_KEY]
         
         google_id = None
@@ -134,21 +141,32 @@ class SearchManager(object):
         return self.db_manager.GetArticle(id)
     
     def __saveResults(self, handler):
-        results = hander.GetResults()
-        self.db_manager.SaveResults(handler.search_id, handler.query, handler.results)
+        results = json.dumps(handler.GetResults(), indent=4)
+        query = json.dumps(handler.query, indent=4)
+        self.logger.debug('Before saving: %s, %s, %s, %s, %s, %s' %(results, type(results), query, type(query), handler.search_id, type(handler.search_id)))
+        self.logger.debug('Saving results to db %s' %results)
+        self.db_manager.SaveSearch(handler.search_id, query, results)        
     
     def __rabbitCallback(self, data, properties):
-        corr_id = properties.correlation_id
-        # Unknown search result, ignore it
-        if not self.queues.has_key(corr_id):
-            return
-            
-        handler = self.queues.pop(corr_id)
-        if handler.SendResults(data, corr_id):
-            # Save the results to the db
-            self.__saveResults(handler)
-            # No longer needed
-            self.handlers.pop(handler.search_id)            
+        self.logger.debug('Rabbit callback with data: %s, %s' %(data, properties))
+        try:
+            corr_id = properties.correlation_id
+            # Unknown search result, ignore it
+            if not self.queues.has_key(corr_id):
+                self.logger.debug("Untracked correlation ID, ignoring %s" %corr_id)
+                return
+                
+            handler = self.queues.pop(corr_id)
+            self.logger.debug("Sending results to search %s" %handler.search_id)
+            if handler.SendResults(data, corr_id):                
+                # Save the results to the db
+                self.logger.debug("Finished search %s" %handler.search_id)
+                self.__saveResults(handler)
+                
+                self.handlers.pop(handler.search_id)
+                    
+        except Exception:
+            self.logger.exception('Exception in rabbit callback')
         
     def GetResults(self, search_id):
         '''
@@ -157,7 +175,7 @@ class SearchManager(object):
         if self.handlers.has_key(search_id):
             return 'Search in progress'
         
-        return self.db_manager.GetSearch(search_id)
+        return json.dumps(self.db_manager.GetSearch(search_id), indent=4)
             
 def main():
     manager = SearchManager()
