@@ -119,6 +119,9 @@ class RabbitFrame(threading.Thread):
         
 class RabbitSender(RabbitFrame):
     
+    failure_sleep = 10
+    max_retries = 3
+    
     def __init__(self, logger, config, queue, reply_to=None):
         RabbitFrame.__init__(self, logger, config, queue)
         
@@ -127,7 +130,7 @@ class RabbitSender(RabbitFrame):
         
         while not self._ready:
             time.sleep(0.5)
-
+    
     def Send(self, data=None, corr_id=None, reply_to_queue=None):
         if corr_id == None:
             corr_id = str(uuid.uuid4())
@@ -136,23 +139,29 @@ class RabbitSender(RabbitFrame):
         reply_to_queue = validate(reply_to_queue, self.reply_to)
 
         # Make this thread safe just in case
-        with self.lock:
+        retries = 0
+        while True:
             # send a message
             try:
-                self.channel.basic_publish(exchange=self.exchange, 
-                                           routing_key=self.queue, 
-                                           body=message,
-                                           properties=pika.BasicProperties(
-                                               delivery_mode = 2, # make message persistent
-                                               correlation_id = corr_id,
-                                               reply_to = reply_to_queue,
-                                           ))
-            except:
-                self.logger.exception("Error publishing to queue %s" %(self.queue, message))
-                              
-        self.logger.debug("Sender: Produced message to queue %s with:\n\tcorrelation ID: %s\n\tbody: %s" %(self.queue, corr_id, message))
-        
-        return corr_id
+                with self.lock:
+                    self.channel.basic_publish(exchange=self.exchange, 
+                                               routing_key=self.queue, 
+                                               body=message,
+                                               properties=pika.BasicProperties(
+                                                   delivery_mode = 2, # make message persistent
+                                                   correlation_id = corr_id,
+                                                   reply_to = reply_to_queue,
+                                               ))
+                self.logger.debug("Sender: produced message to queue %s with:\n\tcorrelation ID: %s\n\tbody: %s" %(self.queue, corr_id, message))                
+                return corr_id
+            except Exception:
+                retries += 1
+                # Never happened more than once
+                if retries >= self.max_retries:                
+                    self.logger.exception("Error publishing to queue %s, message: %s" %(self.queue, message))
+                    return None
+
+            time.sleep(failure_sleep)            
 
 # This is what the callback function looks like
 def printCallback(data, properties):

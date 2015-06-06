@@ -1,0 +1,27 @@
+<html>
+<header>
+<title>Cycurity Bot</title>
+<script src="jquery-1.11.3.min.js"></script>
+<script src="main.js"></script>
+<LINK rel="stylesheet" type="text/css" href="style.css"></LINK>
+</header>
+<body>
+<div id="search">
+<form id="searchForm" action='#'>
+    First Name <input id="first_name" name="first_name" size="10" type="text" value=""><br>
+    Last Name <input id="last_name" name="last_name" size="10" type="text" value=""><br>
+    OR Full Name (for company) <input id="full_name" name="full_name" size="20" type="text" value=""><br>
+    ID (Required) <input id="id" name="id" size="20" type="text" value=""><br>
+    Country of Origin (Required) <input id="origin_country" name="origin_country" size="10" type="text" value=""><br>
+    Country of Transaction (Required) <input id="current_country" name="current_country" size="10" type="text" value=""><br>
+    Google <input checked="" id="use_google" name="use_google" type="checkbox" value="y">
+    Fativa <input checked="" id="use_factiva" name="use_factiva" type="checkbox" value="y">
+    Lexis* <input checked="" id="use_lexis" name="use_lexis" type="checkbox" value="y"> <br>
+    *Lexis requires First &amp; Last name<br>
+    <input id='submitForm' type='button' value="Search">
+</form>
+</div>
+<div id="results"></div>
+<div id="article></div>
+</body>
+</html>

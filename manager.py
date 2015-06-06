@@ -3,6 +3,7 @@ from ConfigParser import SafeConfigParser
 import logging
 import uuid
 from threading import Lock
+from StringIO import StringIO
 
 import server
 from helper import *
@@ -13,6 +14,8 @@ import json
 # Turn down requests and pika logging
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("pika").setLevel(logging.WARNING)
+
+STATUS_KEY = 'status'
 
 class SearchHandler(object):
     
@@ -32,41 +35,85 @@ class SearchHandler(object):
         self.google_results = None
         self.factiva_results = None
         self.lexis_results = None
+
+        self.google_status = SearchStatus.COMPLETE if google_id == None else SearchStatus.PENDING
+        self.factiva_status = SearchStatus.COMPLETE if factiva_id == None else SearchStatus.PENDING
+        self.lexis_status = SearchStatus.COMPLETE if lexis_id == None else SearchStatus.PENDING
         
-        self.google_done = (google_id == None)
-        self.factiva_done = (factiva_id == None)
-        self.lexis_done = (lexis_id == None)        
-        
+        self.complete = False
+    
+    def __allComplete(self):
+        self.complete = searchComplete(self.google_status) and\
+               searchComplete(self.factiva_status) and\
+               searchComplete(self.lexis_status)
+        return self.complete
+    
     def SendResults(self, data, corr_id):
         # Send the results to the handler. Return true if the search is finished.
+        
+        reason = data.get(ERROR_KEY)
+        if reason:
+            status = SearchStatus.ERROR
+        else:
+            status = SearchStatus.COMPLETE
         with self.lock: # To avoid sending the results twice
             if corr_id == self.google_id:
                 self.google_results = data
-                self.google_done = True
+                self.google_status = status
             elif corr_id == self.factiva_id:
                 self.factiva_results = data
-                self.factiva_done = True
+                self.factiva_status = status
             elif corr_id == self.lexis_id:
                 self.lexis_results = data
-                self.lexis_done = True
+                self.lexis_status = status
                 
-            print self.google_done, self.factiva_done, self.lexis_done
-            if self.google_done and self.factiva_done and self.lexis_done:
-                return True
-            
-        return False           
-            
-    def GetResults(self):
+            return self.__allComplete()
+    
+    def __getResult(self, all_results, key, search_results, get_complete=False):
+        ''' Update the all_results dictionary with results of a specific engine '''
+        print 'Search results: %s' %search_results
+        
+        if search_results != None:
+            if get_complete:
+                error = search_results.get(ERROR_KEY)
+                if error:
+                    all_results[key] = {STATUS_KEY: SearchStatus.ERROR, REASON_KEY: error}
+                else:
+                    all_results[key] = {STATUS_KEY: SearchStatus.COMPLETE, RESULTS_KEY: search_results[RESULTS_KEY]}
+            else:
+                all_results[key] = {STATUS_KEY: SearchStatus.COMPLETE}
+        else:
+            all_results[key] = {STATUS_KEY: SearchStatus.PENDING}
+    
+    def GetResults(self, show_complete = False):
         results = {}
-        if self.google_results != None:
-            results[GOOGLE_KEY] = self.google_results
-        if self.factiva_results != None:
-            results[FACTIVA_KEY] = self.factiva_results
-        if self.lexis_results != None:
-            results[LEXIS_KEY] = self.lexis_results
-            
+        
+        # Show complete results if required, or if search finished
+        show_complete = show_complete or self.complete
+        
+        if self.complete:
+            results[STATUS_KEY] = SearchStatus.COMPLETE
+        else:
+            results[STATUS_KEY] = SearchStatus.PENDING
+        
+        # Update the results dictionary
+        if self.google_id:
+            self.__getResult(results, GOOGLE_KEY, self.google_results, show_complete)
+        if self.factiva_id:
+            self.__getResult(results, FACTIVA_KEY, self.factiva_results, show_complete)
+        if self.lexis_id:
+            self.__getResult(results, LEXIS_KEY, self.lexis_results, show_complete)
+        
         return results
             
+STATUS_KEY = 'status'
+
+searchComplete = lambda x: x==True or x == SearchStatus.COMPLETE or x == SearchStatus.ERROR
+class SearchStatus(object):
+    COMPLETE = 'complete'
+    PENDING = 'pending'
+    ERROR = 'error'
+
 class SearchManager(object):
     '''
     A manager for searching data on people.
@@ -80,8 +127,8 @@ class SearchManager(object):
         self.queues = {}
         self.handlers = {}
         
-        self.db_manager = None
-        self.db_manager = pygres.PostgresManager(pygres_config)
+        #self.db_manager = None
+        self.db_manager = pygres.PostgresManager(self.logger, pygres_config)
         self.server = server.ManagerServer(self, config)
     
         self.__loadConfig(config)
@@ -138,11 +185,13 @@ class SearchManager(object):
         return search_id
     
     def GetArticle(self, id):
-        return self.db_manager.GetArticle(id)
+        #data = 'No db'
+        data = self.db_manager.GetArticle(id)
+        return data
     
     def __saveResults(self, handler):
-        results = json.dumps(handler.GetResults(), indent=4)
-        query = json.dumps(handler.query, indent=4)
+        results = json.dumps(handler.GetResults())
+        query = json.dumps(handler.query)
         self.logger.debug('Before saving: %s, %s, %s, %s, %s, %s' %(results, type(results), query, type(query), handler.search_id, type(handler.search_id)))
         self.logger.debug('Saving results to db %s' %results)
         self.db_manager.SaveSearch(handler.search_id, query, results)        
@@ -168,14 +217,21 @@ class SearchManager(object):
         except Exception:
             self.logger.exception('Exception in rabbit callback')
         
-    def GetResults(self, search_id):
+    def GetResults(self, search_id, show_complete=False):
         '''
         Get the results of a search. Later would be fed to a web application
         '''
-        if self.handlers.has_key(search_id):
-            return 'Search in progress'
+        # This happens if the search is in progress
+        handler = self.handlers.get(search_id)
+        if handler:
+            return handler.GetResults(show_complete)
         
-        return json.dumps(self.db_manager.GetSearch(search_id), indent=4)
+        res = self.db_manager.GetSearch(search_id)
+        if not res:
+            return None
+        results = json.loads(res[RESULTS_KEY])
+        
+        return results
             
 def main():
     manager = SearchManager()

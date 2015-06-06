@@ -1,11 +1,12 @@
 import threading
-from flask import Flask, request, render_template, send_from_directory, redirect, url_for
+from flask import Flask, request, render_template, send_from_directory, redirect, url_for, send_file
 from flask_wtf import Form
 from wtforms import StringField, BooleanField, validators
 from ConfigParser import SafeConfigParser
 import os
+from StringIO import StringIO
 
-import json
+from json import dumps
 
 from helper import *
 #import pygres
@@ -19,9 +20,9 @@ class SearchForm(Form):
     full_name = StringField('full_name')
     first_name = StringField('first_name')
     last_name = StringField('last_name')
-    id = StringField('id', validators=[validators.Required(), validators.Length(2,20)])
-    origin_country = StringField('origin_county', validators=[validators.Required(), validators.Length(2,15)])
-    current_country = StringField('current_country', validators=[validators.Required(), validators.Length(2,15)])
+    id = StringField('id')
+    origin_country = StringField('origin_county')
+    current_country = StringField('current_country')
     use_google = BooleanField(GOOGLE_KEY)
     use_factiva = BooleanField(FACTIVA_KEY)
     use_lexis = BooleanField(LEXIS_KEY)
@@ -53,38 +54,45 @@ class ManagerServer(threading.Thread):
         self.host = os.environ.get('OPENSHIFT_PYTHON_IP', 'localhost')
         self.port = int(os.environ.get('OPENSHIFT_PYTHON_PORT', 8080))
     
-    def __showArticle(self, id):
+    def __showArticle(self):
+        try:
+            id = int(request.args.get('id'))
+        except Exception:
+            # Bad parameters
+            return '', 400
+        
         self.logger.debug('Showing article %s' %id)
         try:
-            try:
-                id = int(id)
-            except Exception:
-                print 'Error'
-                return createErrorPage('Invalid article ID supplied: %s' %id)
-
             res = self.manager.GetArticle(id)
 
             if res == None:
-                return createErrorPage('Article not found: %s' %id)
-               
-            return res[DATA_KEY]
+                return '', 404
+
+            return res[DATA_KEY], 200
         except Exception, e:
             self.logger.exception('Exception in show article: %s' %e)
-            return createErrorPage("Internal server error")
+            return 'Server encountered error', 500
     
-    def __searchResults(self, search_id):
+    def __searchResults(self):
         '''
         Get the results of a search. Later would be fed to a web application
         '''
-        return json.dumps(self.manager.GetResults(search_id), indent=4)
+        id = request.args.get('id')
+        if not id:
+            return '', 400
+        
+        res = self.manager.GetResults(search_id)
+        return dumps(res), 200
     
-    def __updateRequest(self, search_request, form):
+    def __validateRequest(self, search_request, form):
         '''
         Update the request and return the error if any
         '''
-        search_request.update({ GOOGLE_KEY: form.use_google.data,
-                                FACTIVA_KEY: form.use_factiva.data,
-                                LEXIS_KEY: form.use_lexis.data, })
+        engines = (form.use_google.data, form.use_factiva.data, form.use_lexis.data)
+        if not any(engines):
+            return 'Atleast one search engine should be used.'
+        
+        search_request.update(dict(zip((GOOGLE_KEY, FACTIVA_KEY, LEXIS_KEY), engines)))
         
         data = { ID_PARAM: form.id.data,
                  ORIGIN_PARAM: form.origin_country.data,
@@ -112,37 +120,41 @@ class ManagerServer(threading.Thread):
     
         return None
     
-    def __searchForm(self):        
-        form = SearchForm()
-        error = None
+    def __startSearch(self):
+        search_request = {}
+        form = SearchForm(request.form)
         
-        # Perform basic validation, 
-        if request.method == 'POST' and form.validate():
-            search_request = {}
-            form = SearchForm(request.form)
-            
-            error = self.__updateRequest(search_request, form)
-            if not error:
-                search_id = self.manager.HandleRequest(search_request)
-                return redirect('/Results/%s' %search_id)
-
-        # Return the form to the user       
-        return render_template('search.html', form=form, error=error)            
+        error = self.__validateRequest(search_request, form)
+        if error:
+            print 'Error: %s' %error
+            return dumps({ERROR_KEY: error}), 400
+        
+        #return 'Finished'
+        search_id = self.manager.HandleRequest(search_request)
+        return dumps({ID_KEY: search_id}), 200      
     
-    def __showResults(self, id):
-        return self.manager.GetResults(id)
+    def __showResults(self):
+        id = request.args.get('id')
+        show_complete = request.args.get('show_complete', False)
+        if not id:
+            return '', 400
+        res = self.manager.GetResults(id, show_complete)
+        if not res:
+            return '', 404
+        return dumps(res)
     
     def __index(self):
         return render_template('index.html')
     
     def __static(self, resource):
+        print resource
         return send_from_directory('static/', resource)
     
     def __route(self):
         # Route the relevant pages to the functions
-        self.app.add_url_rule('/Article/<id>', None, self.__showArticle, methods={'GET'})
-        self.app.add_url_rule('/Results/<id>', None, self.__showResults, methods={'GET', 'POST'})
-        self.app.add_url_rule('/SearchForm', None, self.__searchForm, methods={'GET', 'POST'})
+        self.app.add_url_rule('/article', None, self.__showArticle, methods={'GET'})
+        self.app.add_url_rule('/search', None, self.__startSearch, methods={'POST'})
+        self.app.add_url_rule('/results', None, self.__showResults, methods={'GET', 'POST'})
         self.app.add_url_rule('/', None, self.__index)
         self.app.add_url_rule('/<path:resource>', None, self.__static)        
         
