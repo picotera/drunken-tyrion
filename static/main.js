@@ -58,6 +58,9 @@ jQuery(function($) {
         search: function(e) {
             var app = this;
             formData = app.$searchForm.serialize()
+            
+            app.showResults()
+            
             $.ajax({
                 url: '/search',
                 method: 'POST',
@@ -67,10 +70,11 @@ jQuery(function($) {
                     id = data['id'];
                     console.log('Received search id: ' + id);
                     
-                    app.getResults(id)
+                    app.getResults(id);
                 },
                 error: function(jqXHR) {
                     console.log('Error' + jqXHR)
+                    app.showSearch();
                 }
             });
         },
@@ -114,6 +118,7 @@ jQuery(function($) {
             if (status == 'error') {
                 console.log('Error: ' + data['reason']);
                 this.$results.append('<div class="error">ERROR: ' + data['reason'] + '</div>');
+                return;
             }
             
             results = data['results'];
@@ -121,7 +126,7 @@ jQuery(function($) {
             
             for (var i=0; i<results.length; i++) {
                 console.log(results[i]);
-                this.$results.append('<div class="result"><a class="article" href="/article?id=' + results[i]['id'] + '">' + results[i]['title'] + '</a> from ' + results[i]['source'] + '</div><br>');
+                this.$results.append('<div class="result"><a class="article" href="/article?id=' + results[i]['id'] + '">' + results[i]['title'] + '</a> from ' + results[i]['source'] + ' score: ' + results[i]['score'] + '</div><br>');
             }
         },
         updateResults: function(data) {
@@ -130,8 +135,6 @@ jQuery(function($) {
             this.updateResult(data, 'google');
             this.updateResult(data, 'factiva');
             this.updateResult(data, 'lexis');
-            
-            this.showResults();
         },
         showSearch: function() {
             this.$results.hide();

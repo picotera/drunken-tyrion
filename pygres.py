@@ -17,26 +17,21 @@ ENCODING = 'encoding'
 CONFIG_SECTION = 'POSTGRESQL'
 
 EXCEPTION_SLEEP = 60
-def handle_excepts(source):
-    ''' Designed to handle rare exceptions with postgres, 
-    this happens on db maintanance or something '''
-    def decor(inner_f):
-        def _inner_f(self, *args):
-            try:
-                while True:
-                    try:
-                        return pf_func(self, *args)
-                    except psycopg2.OperationalError:
-                        self.logger.exception('Caught OperationError, sleeping and reconnecting')
-                        time.sleep(EXCEPTION_SLEEP)
-                        self.__connect()
-            except Exception:
-                self.logger.exception("Exception on db action: %s" %(args,))
-                return None
-                
-        return _inner_f
-        
-    return decor
+def handle_excepts(inner_f):
+    def _inner_f(self, *args, **kwargs):
+        try:
+            while True:
+                try:
+                    return inner_f(self, *args, **kwargs)
+                except psycopg2.OperationalError:
+                    self.logger.exception('Caught OperationError, sleeping and reconnecting')
+                    time.sleep(EXCEPTION_SLEEP)
+                    self._connect()
+        except Exception:
+            self.logger.exception("Exception on db action: %s" %(args,))
+            return None
+            
+    return _inner_f
 
 class PostgresConnection(object):
     '''
@@ -46,7 +41,7 @@ class PostgresConnection(object):
         self.logger = logger
     
         self.__loadConfig(config)
-        self.__connect()
+        self._connect()
         self.lock = Lock()
     
         # This will drop the existing table!
@@ -78,7 +73,7 @@ class PostgresConnection(object):
         WARNING: All connections to the DB must be closed first.
         '''
         self.cur.execute('DROP TABLE IF EXISTS %s' %ARTICLES_TABLE)
-        self.cur.execute('CREATE TABLE %s(id serial, source int2, data bytea)' %ARTICLES_TABLE)
+        self.cur.execute('CREATE TABLE %s(id serial, source varchar(8), data bytea)' %ARTICLES_TABLE)
 
         # A table to save searches
         #TODO: Add indexing to search ID?
@@ -87,7 +82,7 @@ class PostgresConnection(object):
         
         self.con.commit()
     
-    def __connect(self):
+    def _connect(self):
         '''
         Connect to the database
         '''

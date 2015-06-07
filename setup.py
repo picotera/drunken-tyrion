@@ -5,5 +5,5 @@ setup(name='manager',
       description='Search manager gear',
       author='Koby Bass',
       author_email='kobybum@gmail.com.com',
-      install_requires=['Flask>=0.10.1','flask-wtf', 'WTForms', 'psycopg2','pika','chardet'],
+      install_requires=['Flask>=0.10.1','flask-wtf', 'WTForms', 'psycopg2','pika'],
      )

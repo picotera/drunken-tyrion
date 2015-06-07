@@ -91,7 +91,7 @@ class RabbitFrame(threading.Thread):
             self.logger.error('Channel closed, reopening')
             if not self.closing:
                 # Create a new connection
-                self.connection = self._connect()
+                self._connect()
                 # Since this gets called by the thread, we don't need to start another thread
                 self.connection.ioloop.start()
     
@@ -157,11 +157,10 @@ class RabbitSender(RabbitFrame):
             except Exception:
                 retries += 1
                 # Never happened more than once
-                if retries >= self.max_retries:                
-                    self.logger.exception("Error publishing to queue %s, message: %s" %(self.queue, message))
+                if retries >= self.max_retries:
+                    self.logger.exception("Error publishing to queue %s" %(self.queue))
                     return None
-
-            time.sleep(failure_sleep)            
+                time.sleep(self.failure_sleep)            
 
 # This is what the callback function looks like
 def printCallback(data, properties):
