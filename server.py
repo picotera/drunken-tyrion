@@ -53,8 +53,14 @@ class ManagerServer(threading.Thread):
         self.secret_key = os.environ.get('SECRET_KEY',self.default_secret)
         self.host = os.environ.get('OPENSHIFT_PYTHON_IP', 'localhost')
         self.port = int(os.environ.get('OPENSHIFT_PYTHON_PORT', 8080))
+
+    def __checkCredentials(self, user, password):
+        return request.args.get('user') == "user" and request.args.get('password') == "123"
     
-    def __showArticle(self):
+    def __showArticle(self, request):
+        if not self.__checkCredentials(request):
+            return 'Bad user name or password!', 400
+
         try:
             id = int(request.args.get('id'))
         except Exception:
@@ -73,10 +79,13 @@ class ManagerServer(threading.Thread):
             self.logger.exception('Exception in show article: %s' %e)
             return 'Server encountered error', 500
     
-    def __searchResults(self):
+    def __searchResults(self, request):
         '''
         Get the results of a search. Later would be fed to a web application
         '''
+        if not self.__checkCredentials(request):
+            return 'Bad user name or password!', 400
+
         id = request.args.get('id')
         if not id:
             return '', 400
@@ -88,6 +97,9 @@ class ManagerServer(threading.Thread):
         '''
         Update the request and return the error if any
         '''
+        if not self.__checkCredentials(request):
+            return 'Bad user name or password!', 400
+
         engines = (form.use_google.data, form.use_factiva.data, form.use_lexis.data)
         if not any(engines):
             return 'Atleast one search engine should be used.'
